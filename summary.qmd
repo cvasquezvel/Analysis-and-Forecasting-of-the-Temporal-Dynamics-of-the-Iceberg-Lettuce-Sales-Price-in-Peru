@@ -1,6 +1,6 @@
 ---
 title: "Análisis de la dinámica temporal del precio de venta de la lechuga americana en el Perú"
-author: "Nelson Saavedra"
+author: "Christian Vásquez"
 format: html
 editor: source
 ---
