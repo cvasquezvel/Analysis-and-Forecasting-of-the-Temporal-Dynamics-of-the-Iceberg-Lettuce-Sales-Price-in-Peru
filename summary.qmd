@@ -1,0 +1,2260 @@
+---
+title: "Análisis de la dinámica temporal del precio de venta de la lechuga americana en el Perú"
+author: "Nelson Saavedra"
+format: html
+editor: source
+---
+
+## Caso de estudio
+
+El presente análisis tiene como objetivo analizar el precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período comprendido entre el año 1997 y el año 2024. La información representada permite observar la evolución del precio de este producto básico en el mercado peruano a lo largo de tres décadas.
+
+## Cargar paquetes
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, anomalize,
+               tibbletime, lubridate, gt, plotly,
+               ISOweek, timetk, scales,# trelliscope
+               tidymodels, modeltime,  imputeTS,
+               modeltime.resample, tibbletime, workflowsets,
+               tseries, rsample, recipes,TSrepr,
+               gt, plotly, sknifedatar, haven, finetune
+               )
+```
+
+## Carga de datos
+
+```{r}
+datos <- readxl::read_excel("data.xlsx", sheet = "Hoja1")
+
+
+get_sunday <- function(x){
+  x <- as.Date(x)
+  sunday <- x - wday(x) + 7
+  return(sunday)
+}
+```
+
+```{r}
+data <- datos %>%
+  dplyr::rename("date" = "Fecha",
+                "value" = "Precio Promedio") %>%
+  dplyr::mutate(Año = as.numeric(format(date, format = "%Y")),
+         Semana = as.numeric(format(date, format = "%W")),
+         day_of_week = format(date, format = "%A"),
+         Date_sunday = get_sunday(date),
+         Date_sunday = ifelse(day_of_week == "domingo",
+                              Date_sunday-7, Date_sunday),
+         Date_sunday = as.Date(Date_sunday + 1 , origin = "1970-01-01")) %>%
+  dplyr::select(-c(Año, Semana)) %>%
+  dplyr::arrange(date) %>%
+  dplyr::group_by(Date_sunday) %>%
+  dplyr::summarise(value = mean(value, na.rm = T)) %>%
+  dplyr::rename(date = Date_sunday) #%>%
+  # dplyr::group_by(Date_sunday) %>%
+  # dplyr::summarise(value = sum(value)) %>%
+  # dplyr::rename("date" = "Date_sunday")
+```
+
+El gráfico presenta una línea que muestra el precio promedio del kg de lechuga americana en el mercado peruano mayorista durante el período de estudio. Se observa que el precio promedio de la lechuga americana experimentó una tendencia general al alza durante este período. Sin embargo, es importante notar que la tendencia no es lineal, sino que presenta fluctuaciones a lo largo del tiempo.
+
+**Descripción de las tendencias**
+
+Se pueden identificar tres períodos principales en la evolución del precio promedio del kg de lechuga americana:
+
+-   **Período de crecimiento (1997-2010):** Durante este período, el precio promedio del kg de lechuga americana experimentó un crecimiento sostenido, pasando de un valor de aproximadamente S/. 0.50 por kilogramo en el año 2000 a un valor de aproximadamente S/. 1.00 por kilogramo en el año 2010. Este crecimiento puede atribuirse a diversos factores, como el aumento de la demanda interna de lechuga americana, el aumento de los costos de producción y los cambios en las condiciones climáticas.
+
+-   **Período de estabilidad (2010-2015):** A partir del año 2010, el precio promedio del kg de lechuga americana se estabilizó en torno a un valor de aproximadamente S/. 1.00 por kilogramo. Esta estabilidad puede explicarse por un equilibrio entre la oferta y la demanda del producto.
+
+-   **Período de nueva tendencia al alza (2015-2024):** A partir del año 2015, el precio promedio del kg de lechuga americana retomó una tendencia al alza, alcanzando un valor de aproximadamente S/. 1.50 por kilogramo en el año 2020. Este nuevo aumento puede atribuirse a factores como el aumento de los costos de transporte y logística, el impacto de las plagas y enfermedades en los cultivos, y la mayor demanda de productos orgánicos. En el año 2023, se observa un pico abrupto en el precio promedio del kg de lechuga americana, alcanzando un valor superior a los S/. 4.00 por kilogramo. Este aumento repentino puede atribuirse a un fenómeno específico que ocurrió en ese año, como un desastre natural, una plaga que afectó los cultivos, o un cambio en las políticas gubernamentales relacionadas con la producción o importación de lechuga americana.
+
+```{r}
+data %>% 
+  # group_by(destino) %>%
+  plot_time_series(.date_var = date, 
+                   .value=value, 
+                   .facet_ncol = 2,
+                   .title = "Precio promedio de la lechuga americana por kg en mercado",
+                   .line_size = 0.2, 
+                   .interactive = FALSE,
+                   .trelliscope = FALSE,
+                   .trelliscope_params = list(width = 1000,
+                                              height = 600)
+  ) +
+  labs(y = "S/.",
+       x = "Año") +
+  scale_x_date(labels = date_format("%Y", locale = "es"),
+               date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) -> pp1
+
+pp1
+```
+
+```{r}
+barplot_file <- paste0("img/histórico.png")
+ggsave(barplot_file, plot = pp1, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+El análisis del gráfico del precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período de 2000 a 2020, con la adición del fenómeno del 2023, permite observar una tendencia general al alza en el precio de este producto, con la excepción de un pico abrupto en el año 2023. Este pico puede atribuirse a un fenómeno específico que ocurrió en ese año. Sin embargo, es importante notar que la tendencia no es lineal, sino que presenta fluctuaciones a lo largo del tiempo. Estas fluctuaciones pueden atribuirse a diversos factores, como el aumento de la demanda interna de lechuga americana, el aumento de los costos de producción, los cambios en las condiciones climáticas, el equilibrio entre la oferta y la demanda del producto, el aumento de los costos de transporte y logística, el impacto de las plagas y enfermedades en los cultivos, y la mayor demanda de productos orgánicos.
+
+```{r}
+FORECAST_HORIZON <- 52
+
+data_extended <- data %>%
+    # group_by(id) %>%
+    future_frame(
+      .date_var = date,
+      .length_out = FORECAST_HORIZON,
+      .bind_data  = TRUE
+    ) %>%
+    ungroup()
+```
+
+## Descomposición de series temporales
+
+El presente análisis tiene como objetivo interpretar el gráfico que muestra el análisis STL del precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período comprendido entre el año 1997 y el año 2024. El análisis STL (Seasonal Trend Decomposition with Loess) es una técnica estadística que permite descomponer una serie temporal en sus componentes de tendencia estacional, residual y ruido. La información representada en el gráfico permite observar la evolución del precio de este producto básico en el mercado peruano a lo largo de dos décadas, considerando sus componentes estacionales y de tendencia.
+
+El gráfico presenta cuatro líneas:
+
+-   **Precio observado:** Esta línea muestra el precio promedio del kg de lechuga americana en el mercado peruano mayorista a lo largo del período de estudio.
+
+-   **Estacionalidad:** Esta línea muestra el componente estacional del precio, es decir, la variación esperada del precio en función de la época del año. Se observa que el precio de la lechuga americana tiene una marcada estacionalidad, con valores más altos en los meses de invierno y valores más bajos en los meses de verano.
+
+-   **Tendencia:** Esta línea muestra el componente de tendencia del precio, es decir, la trayectoria a largo plazo del precio. Se observa que la tendencia del precio de la lechuga americana es al alza durante el período de estudio, con un crecimiento promedio anual de aproximadamente 2%.
+
+-   **Residuo:** Esta línea muestra el componente residual del precio, es decir, la variación del precio que no se explica por la estacionalidad ni por la tendencia. Se observa que el residuo del precio de la lechuga americana es aleatorio, sin una tendencia clara.
+
+```{r}
+data %>% 
+    plot_stl_diagnostics(.date_var = date, 
+                   .value=value,
+                   #.facet_ncol = 2,
+                   .title = "Diagnóstico STL del Precio promedio de la lechuga americana por kg en mercado",
+                   .line_size = 0.2, 
+                   .interactive = FALSE,
+                   .message = FALSE#,
+                   #.trelliscope = FALSE,
+                   # .trelliscope_params = list(width = 1000,
+                   #                            height = 600)
+                   )  +
+  labs(y = "S/.",
+       x = "Año") +
+  scale_x_date(labels = date_format("%Y", locale = "es"),
+               date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) -> pp2
+pp2
+```
+
+```{r}
+barplot_file <- paste0("img/stl.png")
+ggsave(barplot_file, plot = pp2, 
+       width = 120,  # Ancho en mm
+       height = 150,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+**Descripción de los componentes**
+
+-   **Estacionalidad:** La estacionalidad del precio de la lechuga americana puede explicarse por diversos factores, como la mayor demanda del producto en los meses de invierno, cuando se consumen más platos calientes, y la mayor oferta del producto en los meses de verano, cuando se produce la cosecha principal.
+
+-   **Tendencia:** La tendencia al alza del precio de la lechuga americana puede explicarse por diversos factores, como el aumento de la demanda interna y externa de lechuga americana, el aumento de los costos de producción, los cambios en las condiciones climáticas, el aumento de los costos de transporte y logística, el impacto de las plagas y enfermedades en los cultivos, y la mayor demanda de productos orgánicos.
+
+-   **Residuo:** El residuo del precio de la lechuga americana puede explicarse por factores aleatorios, como eventos climáticos extremos, cambios en las políticas gubernamentales, o fluctuaciones en los mercados internacionales.
+
+El análisis STL del precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período de 1997 a 2024 permite observar que el precio de este producto tiene una marcada estacionalidad, con valores más altos en los meses de invierno y valores más bajos en los meses de verano. La tendencia del precio de la lechuga americana es al alza durante el período de estudio, con un crecimiento promedio anual de aproximadamente 2%. El residuo del precio de la lechuga americana es aleatorio, sin una tendencia clara.
+
+## Estacionalidad
+
+El análisis de estacionalidad tiene como objetivo interpretar el precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período comprendido entre el año 1997 y el año 2024, en función de diferentes periodos de tiempo: semana, mes, trimestre y año. El gráfico presenta cuatro boxplots que permiten observar la distribución del precio de la lechuga americana en los periodos antes mencionados. La información representada en el gráfico permite comprender mejor la variabilidad del precio de este producto básico en el mercado peruano a lo largo del tiempo.
+
+```{r}
+data %>% 
+    plot_seasonal_diagnostics(.date_var = date, 
+                   .value=value,
+                   # .facet_ncol = 2,
+                   .title = "Diagnóstico estacional del Precio promedio de la lechuga americana por kg en mercado",
+                   # .line_size = 0.2, 
+                   .interactive = FALSE,
+                   # .trelliscope = FALSE,
+                   # .trelliscope_params = list(width = 1000,
+                   #                            height = 600)
+                   ) +
+  labs(y = "S/.") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) -> pp3
+pp3
+```
+
+```{r}
+barplot_file <- paste0("img/stationality.png")
+ggsave(barplot_file, plot = pp3, 
+       width = 120,  # Ancho en mm
+       height = 150,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+**1. Estacionalidad por semana:**
+
+El gráfico de estacionalidad por semana muestra que el precio de la lechuga americana presenta una variación estacional dentro de cada año. Los precios más altos se observan en las semanas 22 a 40, que corresponden a los meses de mayo a septiembre. Los precios más bajos se observan en las semanas 1 a 12 y 46 a 53, que corresponden a los meses de enero a abril y noviembre y diciembre, respectivamente. Esta variación estacional puede explicarse por diversos factores, como la mayor demanda del producto en los meses de invierno, cuando se consumen más platos calientes en sopas, y la mayor oferta del producto en los meses de verano, cuando se produce la cosecha principal pensada en abastecer principalmente el uso culinario en platos con pescados y mariscos.
+
+**2. Estacionalidad por mes:**
+
+El gráfico de estacionalidad por mes muestra que el precio de la lechuga americana presenta una variación estacional dentro de cada año. Los precios más bajos se observan en los meses de diciembre y enero, mientras que los precios más altos se observan entre los meses de mayo a septiembre. Esta variación estacional puede explicarse por los mismos factores que la estacionalidad por semana, pero a una escala temporal más amplia.
+
+**3. Estacionalidad por quartil:**
+
+El gráfico de estacionalidad por quartil muestra que el precio de la lechuga americana presenta una variación estacional dentro de cada año. Los quartiles 1 (enero a marzo) y 4 (octubre a diciembre), presentan los precios más bajos, mientras que los quartiles 2 (abril a junio) y 3 (julio a septiembre), presentan los precios más altos. Esta variación estacional puede explicarse por los mismos factores que la estacionalidad por semana y por mes, pero a una escala temporal aún más amplia.
+
+**4. Estacionalidad por año:**
+
+El gráfico de estacionalidad por año muestra que el precio de la lechuga americana ha presentado una tendencia al alza durante el período de estudio. Los años con los precios más altos son 2023 y 2024, mientras que los años con los precios más bajos son 1999, 2001, 2002, 2003 y 2004. Esta tendencia al alza puede explicarse por diversos factores, como el aumento de la demanda interna y externa de lechuga americana, el aumento de los costos de producción, los cambios en las condiciones climáticas, el aumento de los costos de transporte y logística, el impacto de las plagas y enfermedades en los cultivos, y la mayor demanda de productos orgánicos.
+
+El análisis de los cuatro gráficos permite concluir que el precio de la lechuga americana en el mercado peruano mayorista presenta una marcada estacionalidad, con valores más altos en los meses de invierno y valores más bajos en los meses de verano. La tendencia del precio de la lechuga americana es al alza durante el período de estudio, con un crecimiento promedio anual de aproximadamente 2%.
+
+## Autocorrelación y autocorrelación parcial
+
+La autocorrelación y la autocorrelación parcial son medidas estadísticas que permiten evaluar la dependencia del precio de la lechuga americana en sí mismo en diferentes períodos de tiempo. El presente análisis tiene como objetivo interpretar los dos gráficos que muestran el análisis de autocorrelación y autocorrelación parcial del precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período comprendido entre el año 1997 y el año 2024.
+
+```{r}
+data %>% 
+    plot_acf_diagnostics(.date_var = date, 
+                   .value=value,
+                   .facet_ncol = 1,
+                   .title = "Autocorrelación y autocorrelación parcial del Precio promedio de la lechuga americana por kg en mercado",
+                   .line_size = 0.2, 
+                   .interactive = FALSE,
+                   # .trelliscope = FALSE,
+                   # .trelliscope_params = list(width = 1000,
+                   #                            height = 600)
+                   ) +
+  labs(y = "S/.") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) -> pp4
+pp4
+```
+
+```{r}
+barplot_file <- paste0("img/acf_pacf.png")
+ggsave(barplot_file, plot = pp4, 
+       width = 120,  # Ancho en mm
+       height = 150,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+**1. Autocorrelación:**
+
+El gráfico de autocorrelación muestra que el precio de la lechuga americana presenta una autocorrelación positiva significativa para lags menores a 10 períodos. Esto significa que existe una correlación positiva entre el precio de la lechuga americana en un período determinado y el precio de la lechuga americana en los 9 períodos siguientes. En otras palabras, si el precio de la lechuga americana aumenta en un período determinado, es probable que el precio también aumente en los 9 períodos siguientes.
+
+**2. Autocorrelación parcial:**
+
+El gráfico de autocorrelación parcial muestra que el precio de la lechuga americana presenta una autocorrelación parcial positiva significativa para los rezagos 1 y 2. Esto significa que existe una relación positiva entre el precio del kg de lechuga americana en un determinado período y el precio del kg de lechuga americana en el período siguiente, controlando por la autocorrelación en rezagos más largos. En otras palabras, si el precio de la lechuga americana aumenta en un período, es más probable que el precio de la lechuga americana siga aumentando en los dos períodos siguientes, independientemente de la tendencia del precio en los períodos anteriores. Esta autocorrelación parcial positiva puede explicarse por los mismos factores que la autocorrelación positiva, pero controlando por la inercia del mercado y la especulación.
+
+## Detección de anomalías
+
+El análisis de anomalías permite identificar valores del precio que se alejan significativamente de la tendencia esperada, lo que puede ser indicativo de eventos inusuales o errores en los datos. El presente análisis tiene como objetivo interpretar el gráfico que muestra el análisis de anomalías del precio histórico del kg de lechuga americana en el mercado peruano mayorista durante el período comprendido entre el año 1997 y el año 2024.
+
+```{r}
+data %>% 
+    plot_anomaly_diagnostics(.date_var = date, 
+                   .value=value,
+                   .facet_ncol = 2,
+                   .title = "Anomalías del Precio promedio de la lechuga americana por kg en mercado",
+                   .line_size = 0.2, 
+                   .facet_scales = 'free_y',
+                   .message = FALSE,
+                   .interactive = FALSE,
+                   .trelliscope = FALSE,
+                   .trelliscope_params = list(width = 1000,
+                                              height = 600)) +
+  labs(y = "S/.") +
+  scale_x_date(labels = date_format("%Y", locale = "es"),
+               date_breaks = "1 year") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) -> pp5
+pp5
+```
+
+```{r}
+barplot_file <- paste0("img/anomaly.png")
+ggsave(barplot_file, plot = pp5, 
+       width = 120,  # Ancho en mm
+       height = 150,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+El gráfico muestra el precio promedio del kg de lechuga americana en el mercado peruano mayorista a lo largo del período de estudio, junto con una línea de tendencia y bandas de confianza. Los puntos que se encuentran fuera de las bandas de confianza se consideran anomalías.
+
+Se observan un total de 33 anomalías en el precio de la lechuga americana durante el período de estudio. Estas anomalías no se distribuyen de manera relativamente uniforme a lo largo del tiempo, pues, se observa una mayor concentración de anomalías en los años **2012, 2015 y 2023**.
+
+**Descripción de las anomalías**
+
+Las anomalías identificadas en el precio del kg de lechuga americana pueden explicarse por diversos factores, como:
+
+-   **Plagas y enfermedades:** Por ejemplo, la plaga del gorgojo de la lechuga americana en el año 2015 afectó la producción de lechuga americana en el Perú, lo que provocó un aumento temporal del precio.
+
+-   **Fenómenos climáticos extremos:** Por ejemplo, el fenómeno de "El niño" Costero en los años 1997 - 1998 (de nivel extraordinario), 2012 (débil), 2015 (Fuerte) y 2023, afectaron la producción de lechuga americana en algunas regiones del Perú, lo que provocó un aumento temporal del precio.
+
+## Modelamiento
+
+### Parallel process
+
+```{r}
+### speed up computation with parallel processing
+
+doParallel::registerDoParallel()
+
+ncores <- parallel::detectCores(logical = TRUE)
+doParallel::registerDoParallel(cores = ncores-1)
+
+```
+
+### Lag roll transformer
+
+```{r}
+# TRANSFORM FUNCTION ----
+# - Function runs recursively that updates the forecasted dataset
+# lag_roll_transformer <- function(data){
+#     data %>%
+#         # Lags
+#         tk_augment_lags(value, .lags = 1:FORECAST_HORIZON) %>%
+#         # Rolling Features
+#         mutate(rolling_mean_52 = lag(slide_dbl(
+#             value, .f = mean,
+#             .before = 52,
+#             .complete = FALSE
+#         ), 1))
+# }
+
+max_lag <- 52 
+
+lag_roll_transformer <- function(data){
+    data %>%
+        # group_by(id) %>%
+        tk_augment_lags(value, .lags = 1:52) #%>%
+        # tk_augment_slidify(
+        #   .value   = contains("lag52"),
+        #   .f       = ~mean(.x, na.rm = T),
+        #   .period  = c(52),
+        #   .partial = TRUE
+        # ) #%>%
+        # ungroup()
+}
+```
+
+```{r}
+data_rolling <- data_extended %>%
+    lag_roll_transformer()
+```
+
+```{r}
+data <- data_rolling %>%
+    drop_na()
+future_data <- data_rolling %>%
+    filter(is.na(value))
+```
+
+### Initial Partition
+
+```{r}
+# split_prop <- 0.9
+# initial_time_split(data = data, prop = split_prop) %>%
+#   tk_time_series_cv_plan() %>%
+#   plot_time_series_cv_plan(date, value, .interactive = FALSE,
+#                            .title = "Partición Train / Test") +
+#   theme(strip.text = element_blank())
+# 
+# data_split <- data %>%
+#   dplyr::arrange(date) %>%
+#   rsample::initial_time_split(prop = split_prop)
+# 
+# data_split %>%
+#   tk_time_series_cv_plan() %>%
+#   plot_time_series_cv_plan(.value = value,
+#                            .date_var = date,
+#                            .interactive = FALSE)
+# 
+# data_train <- training(data_split)
+# data_test <- testing(data_split)
+```
+
+```{r}
+dividir_por_fecha <- function(df, n) {
+  # Obtener todas las fechas y ordenarlas de forma ascendente
+  todas_fechas <- unique(df$date)
+  todas_fechas <- sort(todas_fechas)
+  
+  # Tomar las últimas n fechas
+  ultimas_fechas <- tail(todas_fechas, n)
+  
+  # Filtrar el DataFrame original por las últimas n fechas
+  df_ultimas <- df %>%
+    filter(date %in% ultimas_fechas)
+  
+  # Filtrar el DataFrame original por el resto de las fechas
+  df_resto <- df %>%
+    filter(!date %in% ultimas_fechas)
+  
+  return(list(df_ultimas, df_resto))
+}
+```
+
+```{r}
+week_target <- 52
+
+data_new <- dividir_por_fecha(data, week_target)[[1]]
+data_train <- dividir_por_fecha(data, week_target)[[2]]
+data_test <- dividir_por_fecha(data_train, week_target)[[1]]
+data_train <- dividir_por_fecha(data_train, week_target)[[2]]
+```
+
+```{r}
+# Obtener las fechas únicas para cada partición
+unique_dates <- bind_rows(
+  data_train %>% distinct(date) %>% mutate(type = "Training data"),
+  data_test %>% distinct(date) %>% mutate(type = "Internal test data"),
+  data_new %>% distinct(date) %>% mutate(type = "External test data")
+) %>%
+  dplyr::mutate(split = "Original data")
+
+# Graficar las fechas únicas con cuadrados pintados
+spp <- ggplot(unique_dates, 
+       aes(x = date,
+           y = split,
+           colour = type,
+           fill = type)) +
+  geom_tile() +
+  scale_x_date(labels = date_format("%Y", locale = "en"),
+               date_breaks = "1 year") +  # Formato de fecha por mes y año
+  labs(title = "Time Series Initial Split Plan",
+       x = "Date",
+       y = "",
+       colour = "",
+       fill = "") +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid.major.y = element_blank(),
+        axis.line.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+barplot_file <- paste0("img/split2.png")
+ggsave(barplot_file, plot = spp, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+### Recipes
+
+```{r}
+# Receta sin pasos
+recipe_base <- recipe(value~date,
+                      data = data_train) %>% #training(data_split)
+  step_rm(contains("_lag"))
+
+# Algunas variables de fecha
+recipe_date_features <- recipe_base %>% 
+  step_date(date, features = c('week','month','year'))
+
+# Más variables de fecha
+recipe_date_extrafeatures <- recipe_date_features %>% 
+  step_date(date, features = c('quarter','semester'))
+
+# Valores rezagados: De 1 a 24 meses de retardo  
+recipe_date_extrafeatures_lag <- recipe(value~.,
+                      data = data_train) %>%
+  step_date(date, features = c('week','month','year')) %>% 
+  step_date(date, features = c('quarter','semester')) %>%
+  step_rm(ends_with(as.character(paste0("value_lag",
+                          setdiff(1:52,
+                                  c(1:8, 12, 20, 28, 52)))))) %>%
+  # step_lag(value, lag = c(1:8,12,20,28,52)) %>% 
+  # step_naomit(all_predictors()) %>%
+  # step_filter(if_all(matches("lag", ~ !is.na(.)))) %>%
+  # step_ts_impute(all_numeric_predictors(),
+  #                period=52,
+  #                lambda = "auto"
+  #                ) %>%
+  step_nzv(all_predictors(),
+           -all_outcomes()) %>%
+  step_zv(all_predictors(),
+          -all_outcomes())
+  
+# Transformación de Fourier
+recipe_date_extrafeatures_fourier <- recipe_date_extrafeatures  %>% 
+  step_fourier(date, period = 365/52, K = 1) %>%
+  step_nzv(all_predictors(),
+           -all_outcomes()) %>%
+  step_zv(all_predictors(),
+          -all_outcomes())
+
+# Receta extra
+
+recipe_spec <- recipe(value~.,
+                      data = data_train) %>%
+  step_rm(contains("_lag")) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(matches("(.iso$)|(.xts$)|(^.pm)"),
+          contains("am.pm"), contains("hour"), contains("minute"),
+          contains("second"), contains("xts")) %>%
+  step_fourier(date, period = 365/52, K = 1) %>%
+  step_dummy(all_nominal()) %>%
+  step_nzv(all_predictors(),
+           -all_outcomes()) %>%
+  step_zv(all_predictors(),
+          -all_outcomes())
+
+# Receta extra2
+
+recipe_spec2 <- recipe(value~.,
+                       data = data_train) %>%
+  step_rm(contains("_lag")) %>%
+  step_date(date, features = c("week","month"), ordinal = TRUE) %>%
+  step_mutate(date_num = as.numeric(date)) %>%
+  step_normalize(matches("(index.num$)|(_year$)")) %>%
+  step_normalize(date_num) %>%
+  step_rm(date)
+
+# Receta extra3
+
+recipe_spec3 <- recipe(value~.,
+                       data = data_train) %>%
+  # step_timeseries_signature(date) %>%
+  # step_rm(matches("(.iso$)|(.xts$)|(^.pm)"),
+  #         contains("am.pm"), contains("hour"), contains("minute"),
+  #         contains("second"), contains("xts")) %>%
+  # step_dummy(all_nominal()) %>%
+  # fine for interactive usage
+  step_rm(ends_with(as.character(paste0("value_lag",
+                          setdiff(1:52,
+                                  c(1:8, 12, 20, 28, 52)))))) %>%
+  # step_lag(value, lag = c(1:8,12,20,28,52)) %>%
+  # step_naomit(all_predictors()) %>%
+  # step_filter(if_all(matches("lag", ~ !is.na(.)))) %>%
+  # step_ts_impute(all_numeric_predictors(),
+  #                period=52,
+  #                lambda = "auto"
+  #                ) %>%
+  step_rm(date)
+
+# Receta date
+
+recipe_date <- recipe(value ~ .,
+                      data = data_train) %>% 
+  step_rm(contains("_lag")) %>%
+  step_date(date, features = c('dow','doy','week','month','year')) 
+
+# Transformación de Fourier
+
+recipe_date_fourier <- recipe_date %>%
+  step_fourier(date, period = 365/52, K=1)
+
+# Receta xgboost
+
+recipe_xgboost <- recipe(value ~ .,
+                         data = data_train) %>%
+  step_timeseries_signature(date) %>%
+  step_rm(matches("(xts$)|(iso$)|(^.pm)")) %>%
+  step_rm(contains("am.pm"), contains("hour"), contains("minute"),
+          contains("second"), contains("xts")) %>%
+  step_fourier(date, period = 365/52, K = 1) %>%
+  step_nzv(all_predictors(),
+           -all_outcomes()) %>%
+  step_zv(all_predictors(),
+          -all_outcomes()) %>%
+  step_mutate(date_month = factor(date_month, ordered = TRUE),
+              date_week = factor(date_week, ordered = TRUE)) %>%
+ step_rm(ends_with(as.character(paste0("value_lag",
+                          setdiff(1:52,
+                                  c(1:8, 12, 20, 28, 52)))))) %>%
+  # step_lag(value, lag = c(1:8,12,20,28,52)) %>% 
+  # step_naomit(all_predictors()) %>%
+  # step_filter(if_all(matches("lag", ~ !is.na(.)))) %>%
+  # step_ts_impute(all_numeric_predictors(),
+  #                period=52#,
+  #                # lambda = "auto"
+  #                ) %>%
+  step_rm(date) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE)
+```
+
+### Modelos
+
+```{r}
+# xgboost
+xgboost <- boost_tree(
+  trees = tune(),
+  learn_rate = tune(),
+  sample_size = 0.25
+) %>% 
+  set_engine("xgboost",
+             objective = "reg:gamma",
+             tree_method = "hist",  # Usa "hist" en lugar de "gpu_hist"
+             device = "cuda",       # Usa "cuda" para entrenar en la GPU
+             max_bin = 256) %>% 
+  set_mode("regression")
+
+# prophet_xgboost
+prophet_boost <- prophet_boost(mode = 'regression',
+                               learn_rate = tune(),
+                               trees = tune()) %>% 
+  set_engine("prophet_xgboost",
+             objective = "reg:gamma",
+             tree_method = "hist",  # Usa "hist" en lugar de "gpu_hist"
+             device = "cuda",       # Usa "cuda" para entrenar en la GPU
+             max_bin = 256)
+
+# prophet_xgboost logistic
+prophet_boost_log <- prophet_boost(
+  mode = 'regression',
+  changepoint_range = 0.8,
+  logistic_floor = min(data$value),
+  logistic_cap = max(data$value),
+  learn_rate = tune(),
+  trees = tune(),
+  growth = 'logistic'
+) %>%
+  set_engine("prophet_xgboost",
+             objective = "reg:gamma",
+             tree_method = "hist",  # Usa "hist" en lugar de "gpu_hist"
+             device = "cuda",       # Usa "cuda" para entrenar en la GPU
+             max_bin = 256)
+
+# mars
+mars <- mars( mode = 'regression') %>% 
+  set_engine('earth')
+
+# nnetar
+nnetar <- nnetar_reg(mode = 'regression',
+                     num_networks = tune(),
+                     epochs = tune()) %>% 
+  set_engine("nnetar")
+
+#auto_arima_xgboost
+auto_arima_boost <- arima_boost(mode = 'regression',
+                                learn_rate = tune(),
+                                trees = tune()) %>% 
+  set_engine('auto_arima_xgboost',
+             objective = "reg:gamma",
+             tree_method = "hist",  # Usa "hist" en lugar de "gpu_hist"
+             device = "cuda",       # Usa "cuda" para entrenar en la GPU
+             max_bin = 256)
+
+#auto_arima
+auto_arima <- arima_reg() %>%
+  set_engine(engine = "auto_arima")
+
+# ets
+ets <- exp_smoothing() %>%
+  set_engine(engine = "ets")
+
+# lm
+lm <- linear_reg() %>%
+    set_engine("lm")
+```
+
+### Workflowsets
+
+```{r}
+wfsets <- workflow_set(
+  preproc = list(
+    base                  = recipe_base,
+    features              = recipe_date_features,
+    extrafeatures         = recipe_date_extrafeatures,
+    extrafeatures_lag     = recipe_date_extrafeatures_lag,
+    extrafeatures_fourier = recipe_date_extrafeatures_fourier,
+    extra                 = recipe_spec,
+    extra2                = recipe_spec2,
+    extra3                = recipe_spec3,
+    xgboost               = recipe_xgboost,
+    base_date             = recipe_date,
+    fourier               = recipe_date_fourier
+    
+  ),
+  models  = list(
+    M_lm                = lm,
+    M_arima             = auto_arima,
+    M_arima_boost       = auto_arima_boost,
+    M_prophet_boost_log = prophet_boost_log,
+    M_prophet_boost     = prophet_boost,
+    M_mars              = mars,
+    M_nnetar            = nnetar,
+    M_xgboost           = xgboost,
+    M_ets               = ets
+  ),
+  cross   = TRUE
+) 
+wfsets
+```
+
+
+
+```{r}
+wfsets <- wfsets %>% 
+  anti_join(
+    tibble(wflow_id = c(
+      ###########
+      "base_M_prophet_boost_log",
+      "base_M_xgboost",
+      "features_M_arima_boost",
+      "features_M_prophet_boost_log",
+      "features_M_prophet_boost",
+      "features_M_xgboost",
+      "extrafeatures_M_arima",
+      "extrafeatures_M_arima_boost",
+      "extrafeatures_M_prophet_boost_log",
+      "extrafeatures_M_prophet_boost",
+      "extrafeatures_M_xgboost",
+      "extrafeatures_lag_M_arima",
+      "extrafeatures_lag_M_arima_boost",
+      "extrafeatures_lag_M_prophet_boost_log",
+      "extrafeatures_lag_M_prophet_boost",
+      "extrafeatures_lag_M_xgboost",
+      "extrafeatures_fourier_M_arima",
+      "extrafeatures_fourier_M_arima_boost",
+      "extrafeatures_fourier_M_prophet_boost_log",
+      "extrafeatures_fourier_M_prophet_boost",
+      "extrafeatures_fourier_M_xgboost",
+      "extra_M_arima",
+      "extra_M_arima_boost",
+      "extra_M_prophet_boost_log",
+      "extra_M_prophet_boost",
+      "extra_M_xgboost",
+      "extra2_M_arima",
+      "extra2_M_arima_boost",
+      "extra2_M_prophet_boost_log",
+      "extra2_M_prophet_boost",
+      "extra2_M_nnetar",
+      "extra2_M_xgboost",
+      "extra2_M_ets",
+      "extra3_M_arima",
+      "extra3_M_arima_boost",
+      "extra3_M_prophet_boost_log",
+      "extra3_M_prophet_boost",
+      "extra3_M_nnetar",
+      "extra3_M_ets",
+      "xgboost_M_arima",
+      "xgboost_M_arima_boost",
+      "xgboost_M_prophet_boost_log",
+      "xgboost_M_prophet_boost",
+      "xgboost_M_nnetar"
+    )),
+    by = "wflow_id")
+wfsets
+```
+
+### Cross Validation Plan
+
+```{r}
+folds <- 3
+
+data_folds <- data_train %>%
+  time_series_cv(
+    date_var    = date,
+    initial     = "365 days", #33
+    assess      = "365 days", # 17
+    skip        = "365 days", # 7
+    slice_limit = folds,
+    cumulative  = TRUE#,
+    # prop = 0.8
+  )
+
+data_folds
+
+data_folds %>%
+  plot_time_series_cv_plan(date, value,
+                           .interactive = FALSE)
+
+```
+
+```{r}
+# Extraer fechas de entrenamiento y prueba de cada partición y combinar en un dataframe
+fechas_df <- map_dfr(seq_along(data_folds$splits), function(i) {
+  split <- paste0("Slice", i)
+  fechas_entrenamiento <- analysis(data_folds$splits[[i]])$date
+  fechas_prueba <- assessment(data_folds$splits[[i]])$date
+  df_entrenamiento <- data.frame(split = rep(split, length(fechas_entrenamiento)),
+                                  date = fechas_entrenamiento,
+                                  type = rep("Cross validation train data", length(fechas_entrenamiento)),
+                                  stringsAsFactors = FALSE)
+  df_prueba <- data.frame(split = rep(split, length(fechas_prueba)),
+                          date = fechas_prueba,
+                          type = rep("Cross validation test data", length(fechas_prueba)),
+                          stringsAsFactors = FALSE)
+  bind_rows(df_entrenamiento, df_prueba)
+})
+
+date_plan <- unique_dates %>%
+   mutate(type_split = split) %>%
+  bind_rows(fechas_df %>%
+              mutate(type_split = split)) %>%
+  mutate(type_split = factor(type_split,
+                             levels = rev(c("Original data",
+                                        paste0("Slice",1:folds)))),
+         type = factor(type, 
+                       levels = c("Training data",
+                                  "Internal test data",
+                                  "External test data",
+                                  "Cross validation train data",
+                                  "Cross validation test data")))
+```
+
+```{r}
+spp2 <- ggplot(date_plan, 
+       aes(x = date,
+           y = type_split,
+           colour = type,
+           fill = type)) +
+  geom_tile() +
+  scale_x_date(labels = date_format("%Y", locale = "en"), date_breaks = "1 year") +  # Formato de fecha por mes y año
+  labs(title = "Time Series Initial Split Plan and Cross Validation Split Plan",
+       x = "Date",
+       y = "",
+       colour = "",
+       fill = "") +
+  theme_classic() +
+  theme(#axis.text.y = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "bottom"#,
+        # panel.grid.major.y = element_blank(),
+        # axis.line.y = element_blank(),
+        # axis.ticks.y = element_blank()
+        ) +
+  guides(fill = guide_legend(ncol = 3),
+         colour = guide_legend(ncol = 3))
+
+barplot_file <- paste0("img/split3.png")
+ggsave(barplot_file, plot = spp2, 
+       width = 100,  # Ancho en mm
+       height = 110,  # Altura en mm
+       units = "mm",
+       dpi = 600,
+       scale = 1.5)
+```
+
+### Metrics set
+
+```{r}
+# multi_met <- yardstick::metric_set(
+#   yardstick::smape,
+#   yardstick::rmse,
+#   yardstick::rsq,
+#   yardstick::rsq_trad,
+#   yardstick::mape,
+#   yardstick::mae,
+#   yardstick::mpe,
+#   yardstick::ccc)
+multi_met <- yardstick::metric_set(yardstick::rmse,
+  yardstick::smape,
+  yardstick::rsq,
+  yardstick::rsq_trad,
+  yardstick::mape,
+  modeltime::maape,
+  yardstick::mase,
+  yardstick::mae,
+  yardstick::mpe,
+  yardstick::ccc)
+select_metric <- "rmse"
+```
+
+### CV with Bayes optimization
+
+```{r}
+bayes_ctrl <-
+  control_bayes(
+    # El corte entero para el número de iteraciones sin mejores resultados.
+    no_improve = 5,
+    extract = identity,
+    save_pred = TRUE,
+    save_workflow = TRUE,
+    save_gp_scoring = TRUE,
+    verbose = TRUE,
+    parallel_over = "everything"
+  )
+
+full_results_time <- 
+  system.time(
+    bayes_results <- 
+      wfsets %>% 
+      workflow_map(seed = 1503,
+                   resamples = data_folds,
+                   initial = 5, 
+                   iter = 25,
+                   metrics = multi_met,
+                   control = bayes_ctrl,
+                   verbose = TRUE)  %>%
+  dplyr::mutate(
+    fit = map(result,
+              workflowsets::fit_best,
+              metric = select_metric)
+  )
+  )
+```
+
+```{r}
+# Proceso para obtener los mejores resultados con nombres de wflow_id
+best_results <- bayes_results %>%
+  mutate(
+    best_model = map(result, ~ tune::select_best(.x, metric = select_metric)),
+    fit = map2(best_model, info, ~ {
+      wflow <- .y$workflow[[1]] # Extraer el workflow de la lista
+      tune::finalize_workflow(wflow, .x)
+    })
+  ) %>%
+  { set_names(.$fit, .$wflow_id) }
+
+# Verificamos la estructura de best_results
+best_results
+```
+
+
+```{r}
+### No recursivo (incorrecto)
+
+fit_recursive_model <- function(split, model) {
+  analysis_data <- analysis(split)
+  assessment_data <- assessment(split)
+  
+  # Lista de columnas que contienen "value_lag"
+  # lag_columns <- grep("value_lag", names(assessment_data), value = TRUE)
+
+  # Reemplazar todas las observaciones en estas columnas con NA
+  assessment_data <- assessment_data #%>%
+    # mutate_at(vars(lag_columns), ~ NA)
+  
+  # Ajustar el modelo en los datos de entrenamiento de forma recursiva
+  model_fit <- model %>%
+    fit(analysis_data) %>%
+    recursive(
+      transform  = lag_roll_transformer,
+      train_tail = tail(analysis_data, 52)
+    )
+  
+  # Predecir en los datos de prueba
+  predictions <- model_fit %>%
+    predict(new_data = assessment_data) %>%
+    bind_cols(assessment_data)
+  
+  return(predictions)
+}
+```
+
+```{r}
+### Recursivo (correcto)
+
+fit_recursive_model <- function(split, model) {
+  analysis_data <- analysis(split)
+  assessment_data <- assessment(split)
+  
+  # Ajustar el modelo en los datos de entrenamiento
+  model_fit <- model %>%
+    fit(analysis_data)
+  
+  # Obtener el número máximo de horizontes de predicción
+  max_horizon <- nrow(assessment_data)
+  
+  # Inicializar un vector para almacenar las predicciones recursivas
+  recursive_preds <- numeric(max_horizon)
+  
+  # Realizar predicciones recursivas para cada horizonte de predicción
+  for (h in 1:max_horizon) {
+    # Predicción para el horizonte actual
+    current_pred <- model_fit %>%
+      predict(new_data = assessment_data[h, , drop = FALSE])
+    
+    # Almacenar la predicción en el vector de predicciones recursivas
+    recursive_preds[h] <- current_pred$.pred
+    
+    # Actualizar los valores de los lags para la siguiente predicción
+    if (h < max_horizon) {
+      # Actualizar value_lag1 con la predicción actual
+      assessment_data[h + 1, "value_lag1"] <- current_pred$.pred
+      # Desplazar los demás lags hacia la derecha
+      for (lag in 2:(max_horizon - 1)) {
+        assessment_data[h + 1, paste0("value_lag", lag)] <- assessment_data[h, paste0("value_lag", lag - 1)]
+      }
+    }
+  }
+  
+  # Agregar las predicciones recursivas al conjunto de datos de evaluación
+  predictions <- cbind(assessment_data, recursive_preds)
+  colnames(predictions)[ncol(predictions)] <- ".pred"
+  
+  return(predictions)
+}
+
+```
+
+
+```{r}
+recursive_cv_results <- map(best_results, function(model) {
+  map(data_folds$splits, fit_recursive_model, model = model)
+})
+```
+
+
+```{r}
+# Función para evaluar las predicciones
+evaluate_predictions <- function(predictions) {
+  multi_met(predictions, truth = value, estimate = .pred)
+}
+
+# Aplicar las métricas a los resultados de las predicciones
+metrics <- map(recursive_cv_results, function(model_results) {
+  map_dfr(model_results, evaluate_predictions, .id = "fold")
+})
+
+# Combinar las métricas en un solo data frame
+final_metrics <- bind_rows(metrics, .id = "model_id")
+
+# Mostrar las métricas finales
+final_metrics
+```
+
+```{r}
+final_metrics %>%
+  pivot_wider(names_from = ".metric", values_from = ".estimate") %>%
+  group_by(model_id) %>%
+  summarise(across(everything(), mean)) %>%
+  dplyr::select(-c(fold, .estimator))
+```
+
+
+```{r}
+bayes_results <- bayes_results %>% 
+  anti_join(
+    tibble(wflow_id = c(
+      ###########
+      "extrafeatures_M_arima",
+      "extrafeatures_lag_M_arima",
+      "extrafeatures_fourier_M_arima",
+      "extra_M_arima",
+      "extra2_M_arima",
+      "xgboost_M_arima",
+      "base_M_arima",
+      "features_M_arima",
+      "base_date_M_arima",
+      "fourier_M_arima",
+      ###########
+      "base_M_prophet_boost",
+      "features_M_lm",
+      "features_M_arima_boost",
+      "features_M_nnetar",
+      "extrafeatures_M_arima_boost",
+      "extrafeatures_M_nnetar",
+      "extrafeatures_fourier_M_lm",
+      "extrafeatures_fourier_M_prophet_boost",
+      "base_date_M_prophet_boost",
+      "base_date_M_nnetar",
+      "fourier_M_arima_boost",
+      "base_M_arima_boost",
+      "base_M_nnetar",
+      "features_M_prophet_boost",
+      "extrafeatures_M_lm",
+      "extrafeatures_M_prophet_boost",
+      "extrafeatures_fourier_M_arima_boost",
+      "extrafeatures_fourier_M_nnetar",
+      "base_date_M_arima_boost",
+      "fourier_M_prophet_boost",
+      "fourier_M_nnetar",
+      ###########
+      "features_M_mars",
+      "extrafeatures_lag_M_mars",
+      "extra2_M_arima_boost",
+      "extra2_M_ets",
+      "extra2_M_nnetar",
+      "extra2_M_prophet_boost",
+      "extra2_M_prophet_boost_log",
+      "extra2_M_xgboost",
+      "base_M_xgboost",
+      "base_M_lm",
+      "features_M_xgboost",
+      "extrafeatures_M_xgboost",
+      "extrafeatures_lag_M_xgboost",
+      "extrafeatures_fourier_M_xgboost",
+      "extra_M_xgboost",
+      "xgboost_M_arima_boost",
+      "xgboost_M_prophet_boost",
+      "xgboost_M_nnetar",
+      "base_M_mars",
+      "extrafeatures_M_mars",
+      "extrafeatures_fourier_M_mars",
+      "xgboost_M_mars",
+      "extrafeatures_lag_M_nnetar",
+      "base_date_M_lm",
+      "base_date_M_xgboost",
+      "fourier_M_lm",
+      "fourier_M_xgboost"
+    )), 
+    by = "wflow_id")
+
+```
+
+```{r}
+best_metrics <- bayes_results %>% 
+  rank_results() %>% 
+  filter(.metric == select_metric) %>% 
+  select(model, .config, mean, rank) %>%
+  as.data.frame()
+```
+
+```{r}
+autoplot(
+  bayes_results,
+  rank_metric = select_metric,  # <- how to order models
+  metric = select_metric,       # <- which metric to visualize
+  select_best = TRUE     # <- one point per workflow
+) +
+  geom_text(aes(y = mean - std_err*3, label = wflow_id), angle = 90, hjust = 1) +
+  geom_text(aes(y = mean + std_err*3, label = round(mean,1)), angle = 90, hjust = 0) +
+  # lims(y = c(-5, 1)) + #-400, 200
+  lims(y = c(-600, 200)) + #-400, 200
+  theme(legend.position = "none")
+```
+
+```{r}
+# autoplot(bayes_results, id = "extrafeatures_lag_M_prophet_boost", metric = select_metric)
+```
+
+### Ranks
+
+```{r}
+ranks <- bayes_results %>% 
+  rank_results() %>%
+  # filter(.metric == select_metric) %>%
+  select(-std_err) %>%
+  pivot_wider(values_from = mean,
+              names_from = .metric) %>%
+  # select(model, .config, rsq = mean, rank, wflow_id) %>%
+  group_by(wflow_id) %>%
+  # change metric in this step
+  slice_min(smape, with_ties = FALSE) %>%
+  # slice_max(.config) %>%
+  ungroup() %>%
+  # change metric in this step
+  dplyr::arrange(smape) %>% 
+  dplyr::mutate(rank = 1:nrow(.)) %>%
+  dplyr::relocate(wflow_id, rank) 
+ranks %>% 
+  gt() %>% 
+  tab_header(title='Models sets evaluation') %>% 
+  tab_footnote(
+    footnote = "Only possible combinations of models with recipes are shown.",
+    locations = cells_column_labels(
+      columns = c(wflow_id))
+  )
+```
+
+```{r}
+res_ranks <-
+  bayes_results %>%
+  workflowsets::rank_results(select_metric) %>%
+  filter(.metric == select_metric) %>%
+  select(wflow_id, model, .config, mean, rank) %>%
+  group_by(wflow_id) %>%
+  slice_min(rank, with_ties = FALSE) %>%
+  ungroup() %>%
+  dplyr::arrange(rank)
+
+res_ranks
+```
+
+```{r}
+bayes_results <- bayes_results %>%
+  dplyr::left_join(res_ranks %>% 
+  dplyr::select(wflow_id, rank), by = c("wflow_id"))
+
+bayes_results
+```
+
+### Best models
+
+```{r}
+best_list <- head(res_ranks$wflow_id,3)
+```
+
+```{r}
+best_tune_results <- bayes_results %>%
+  unnest(cols = 4) %>%
+  dplyr::filter(wflow_id %in%
+                  best_list) %>%
+  unnest(cols = 6)
+best_tune_results
+```
+
+```{r}
+best_tune_predictions <- bayes_results %>%
+  unnest(cols = 4) %>%
+  dplyr::filter(wflow_id %in% 
+                  best_list) %>%
+  unnest(cols = 9)
+best_tune_predictions
+```
+
+```{r}
+best_tune_splits <- bayes_results %>%
+  unnest(cols = 4) %>%
+  dplyr::filter(wflow_id %in% 
+                  best_list)
+best_tune_splits
+```
+
+```{r}
+best_hiperparameters <- bayes_results %>%
+  unnest(cols = 4) %>%
+  dplyr::filter(wflow_id %in% 
+                  best_list) %>%
+  unnest(cols = 6) %>%
+  filter(.metric == select_metric) %>%
+  group_by(wflow_id#, 
+           #trees, learn_rate, 
+           #epochs, num_networks
+           ) %>%
+  summarise(.estimate = mean(.estimate, na.rm = T)) %>%
+  ungroup() %>%
+  group_by(wflow_id) %>%
+  # change min or max order
+  # filter(.estimate == max(.estimate, na.rm = T)) %>%
+  slice_min(.estimate, with_ties = FALSE) %>%
+  # change ranking order
+  arrange(.estimate) %>%
+  select(wflow_id,# trees, learn_rate,# epochs, num_networks,
+         .estimate)
+best_hiperparameters
+```
+
+```{r}
+best_split_predictions <- best_tune_predictions %>%
+  filter(wflow_id == best_hiperparameters$wflow_id[1]#,
+         # trees == best_hiperparameters$trees[1],
+         # learn_rate == best_hiperparameters$learn_rate[1]
+         ) %>%
+  bind_rows(best_tune_predictions %>%
+  filter(wflow_id == best_hiperparameters$wflow_id[2]#,
+         # trees == best_hiperparameters$trees[2],
+         # learn_rate == best_hiperparameters$learn_rate[2]
+         ),
+         # best_tune_predictions %>%
+         #      filter(wflow_id == best_hiperparameters$wflow_id[2],
+         #             num_networks == best_hiperparameters$num_networks[2],
+         #             epochs == best_hiperparameters$epochs[2]),
+            best_tune_predictions %>%
+              filter(wflow_id == best_hiperparameters$wflow_id[3]#,
+                     # trees == best_hiperparameters$trees[3],
+                     # learn_rate == best_hiperparameters$learn_rate[3]
+                     )#,
+            # best_tune_predictions %>%
+            #   filter(wflow_id == best_hiperparameters$wflow_id[4],
+            #          trees == best_hiperparameters$trees[4],
+            #          learn_rate == best_hiperparameters$learn_rate[4])#,
+            # best_tune_predictions %>%
+            #   filter(wflow_id == best_hiperparameters$wflow_id[5],
+            #          hidden_units == best_hiperparameters$hidden_units[5],
+            #          epochs == best_hiperparameters$epochs[5])
+            )
+best_split_predictions
+```
+
+```{r}
+best_tune_splits$.predictions%>% unique()
+
+
+splitdat <- NULL
+
+# table(best_splits$wflow_id)
+
+for(i in 1:length(best_tune_splits$wflow_id)){
+  splitdat <- splitdat %>% 
+    bind_rows(assessment(best_tune_splits$splits[[i]]) %>%
+                dplyr::mutate(wflow_id = best_tune_splits$wflow_id[i],
+                              id = best_tune_splits$id[i]) %>%
+                dplyr::bind_cols(best_split_predictions %>%
+                                   dplyr::filter(id %in% best_tune_splits$id[i],
+                                                 wflow_id %in%
+                                                   best_tune_splits$wflow_id[i]) %>%
+                            dplyr::select(-c(value,
+                                            wflow_id,
+                                            id))))
+}
+
+splitdat$id %>% unique()
+```
+
+```{r}
+p1 <- splitdat %>%
+  ggplot(aes(x = date)) +
+  geom_line(aes(y = value, colour = "observed")) +
+  geom_line(aes(y = .pred, colour = "predicted")) +
+  # geom_point(alpha = 0.5) + 
+  labs(x = "date", y = "price",
+       colour = "") +
+  facet_wrap(wflow_id~id) +
+  theme_classic()
+p1
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_1.jpeg")
+ggsave(barplot_file, plot = p1, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 5)
+```
+
+```{r}
+p2 <- splitdat %>% 
+  ggplot(aes(x = value, y = .pred)) + 
+  geom_abline(color = "gray50", lty = 2) + 
+  geom_point(alpha = 0.5) + 
+  # coord_obs_pred() +
+  labs(x = "observed", y = "predicted") +
+  facet_wrap(wflow_id~id) +
+  theme_classic()
+p2
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_2.jpeg")
+ggsave(barplot_file, plot = p2, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+### Final Models
+
+```{r}
+best_hiperparameters
+
+
+# # prophet_xgboost 
+# prophet_boost <- prophet_boost(mode = 'regression',
+#                                learn_rate = best_hiperparameters %>%
+#                                  filter(wflow_id %in% "extrafeatures_lag_M_prophet_boost") %>%
+#                                  pull(learn_rate),
+#                                trees = best_hiperparameters %>%
+#                                  filter(wflow_id %in% "extrafeatures_lag_M_prophet_boost") %>%
+#                                  pull(trees)) %>% 
+#   set_engine("prophet_xgboost")
+# 
+# # nnetar
+# nnetar <- nnetar_reg(num_networks = best_hiperparameters %>%
+#                            filter(wflow_id %in% "extrafeatures_lag_M_nnetar") %>%
+#                            pull(num_networks),
+#                          epochs = best_hiperparameters %>%
+#                            filter(wflow_id %in% "extrafeatures_lag_M_nnetar") %>%
+#                            pull(epochs)) %>% 
+#   set_engine("nnetar")
+# 
+# # nnetar_hp2 <- nnetar_reg(hidden_units = 3,
+# #                       epochs = 298) %>% 
+# #   set_engine("nnetar")
+# 
+# # xgboost
+# xgboost <- boost_tree(
+#   trees = best_hiperparameters %>%
+#     filter(wflow_id %in% "xgboost_M_xgboost") %>%
+#     pull(trees),
+#   learn_rate = best_hiperparameters %>%
+#     filter(wflow_id %in% "xgboost_M_xgboost") %>%
+#     pull(learn_rate)
+# ) %>% 
+#   set_engine("xgboost") %>% 
+#   set_mode("regression")
+
+# lm
+# lm <- linear_reg() %>%
+#     set_engine("lm")
+```
+
+### Sets models
+
+```{r}
+wfsets_best <- workflow_set(
+  preproc = list(
+    # base                  = recipe_base,
+    # features              = recipe_date_features,
+    # extrafeatures         = recipe_date_extrafeatures,
+    # extrafeatures_lag     = recipe_date_extrafeatures_lag,
+    # extrafeatures_fourier = recipe_date_extrafeatures_fourier,
+    extra                 = recipe_spec,
+    extra2                = recipe_spec2,
+    extra3                = recipe_spec3,
+    xgboost               = recipe_xgboost
+    
+  ),
+  models  = list(
+    M_prophet_boost     = prophet_boost,
+    M_nnetar            = nnetar,
+    M_xgboost           = xgboost,
+    M_lm                = lm#,
+    # M_nnetar_hp2        = nnetar_hp2
+  ),
+  cross   = TRUE
+)
+
+# Obtener los mejores modelos ajustados
+best_models <- bayes_results %>%
+  dplyr::select(wflow_id, fit, rank) %>%
+  arrange(rank) %>%
+  filter(rank <= 3) # Seleccionar los 3 mejores
+
+wfsets_best <- wfsets_best %>% 
+  inner_join(
+    tibble(wflow_id = c(best_models$wflow_id)), 
+    by = "wflow_id")
+wfsets_best
+```
+
+```{r}
+wfsets_best$option[[1]]
+```
+
+### Fit models
+
+```{r}
+models_tbl <- wfsets_best %>% 
+    modeltime_fit_workflowset(
+        data = data_train,
+        control = control_fit_workflowset(
+            allow_par = TRUE,
+            cores = ncores-1,
+            verbose = TRUE
+        )
+    )
+models_tbl
+```
+
+### Add recursive
+
+```{r}
+# Aplicar la función recursive a todos los modelos en models_tbl
+models_tbl <- models_tbl %>%
+  mutate(
+    .model = map(.model, ~ .x %>%
+                   recursive(
+                     transform  = lag_roll_transformer,
+                     train_tail = tail(data_train, max_lag)
+                   ))
+  )
+```
+
+
+```{r}
+# models_tbl$.model[[2]] <- models_tbl$.model[[2]] %>%
+#     recursive(
+#         transform  = lag_roll_transformer,
+#         train_tail = tail(data_train, max_lag)
+#     )
+# models_tbl$.model[[2]]
+# models_tbl$.model[[3]] <- models_tbl$.model[[3]] %>%
+#     recursive(
+#         transform  = lag_roll_transformer,
+#         train_tail = tail(data_train, max_lag)
+#     )
+# models_tbl$.model[[3]]
+```
+
+```{r}
+best_models$fit[[2]] <- best_models$fit[[2]] %>%
+    recursive(
+        transform  = lag_roll_transformer,
+        train_tail = tail(data_train, max_lag)
+    )
+best_models$fit[[2]]
+best_models$fit[[3]] <- best_models$fit[[3]] %>%
+    recursive(
+        transform  = lag_roll_transformer,
+        train_tail = tail(data_train, max_lag)
+    )
+best_models$fit[[3]]
+```
+
+```{r}
+# models_tbl <- best_models$fit %>%
+#     as_modeltime_table()
+# models_tbl$.model[[3]]
+```
+
+```{r}
+# model1 <- best_models$fit[[1]]
+# model2 <- best_models$fit[[2]]
+# model3 <- best_models$fit[[3]]
+# 
+# models_tbl <- modeltime_table(
+#     model1,
+#     model2,
+#     model3
+# )
+# models_tbl
+```
+
+### Calibration (Internal Testing set)
+
+```{r}
+calibration_tbl <- models_tbl %>%
+    modeltime_calibrate(new_data = data_test)
+calibration_tbl
+```
+
+### Accuracy (Internal Testing set)
+
+```{r}
+# Realizar predicciones en data_test
+best_models <- best_models %>%
+  mutate(predictions = map(fit, ~ predict(.x, new_data = data_test)))
+
+# Unir las predicciones con data_test
+best_models <- best_models %>%
+  mutate(results = map(predictions,
+                       ~ bind_cols(data_test, .)))
+
+# Ver los resultados
+best_models %>%
+  select(wflow_id, results) %>%
+  unnest(results)
+```
+
+```{r}
+# Definir una función para calcular las métricas
+calculate_metrics <- function(data) {
+  metrics <- multi_met
+  
+  # Calcular las métricas
+  results <- metrics(data, truth = value, estimate = .pred)
+  
+  return(results)
+}
+
+# Evaluar el desempeño de los modelos en `data_test`
+best_models <- best_models %>%
+  mutate(performance = map(results, calculate_metrics))
+
+# Ver el desempeño
+performance_test <- best_models %>%
+  select(wflow_id, performance) %>%
+  unnest(performance) %>%
+  pivot_longer(cols = -c(.metric,
+                         .estimator,
+                         wflow_id),
+               names_to = "model", values_to = "value")
+```
+
+```{r}
+# ---- ACCURACY ----
+
+accuracy_tbl <- calibration_tbl %>%
+    modeltime_accuracy(metric_set = multi_met)%>% 
+  separate(.model_desc, c('recipe', 'model'), sep='_M_', remove=FALSE)
+
+accuracy_tbl %>% 
+  gt() %>% 
+  tab_header(title='Models sets evaluation') %>% 
+  tab_footnote(
+    footnote = "Only possible combinations of models with recipes are shown.",
+    locations = cells_column_labels(
+      columns = c(.model_id))
+  )
+```
+
+```{r}
+calibration_tbl %>%
+    modeltime_accuracy(metric_set = multi_met) %>% 
+  separate(.model_desc, c('recipe', 'model'),
+           sep='_M_',
+           remove=FALSE) %>%
+    table_modeltime_accuracy(
+        .interactive = TRUE
+    )
+```
+
+### Metrics headmap (Internal Testing set)
+
+```{r}
+# Asumimos que accuracy_tbl es el dataframe que contiene los datos
+
+heatmap_metrics <- accuracy_tbl %>%
+  pivot_longer(cols = c(smape, rmse, rsq, rsq_trad, mape, mae, mpe, ccc),
+               names_to = "metric") %>%
+  group_by(metric) %>%
+  summarise(plot_data = list(cur_data_all()))
+
+# Ahora creamos los gráficos fuera de summarise
+heatmap_plots <- heatmap_metrics %>%
+  mutate(
+    plot = map2(metric, plot_data, ~{
+      ggplot(.y, aes(x = recipe, y = model, fill = value)) +
+        geom_tile() +
+        scale_fill_gradient(low = "#ece2f0", high = "#02818a") +
+        labs(title = .x,
+             fill = .x) +
+        theme_minimal()
+    })
+  )
+
+# Para ver un gráfico en particular, puedes usar
+heatmap_plots$plot[[1]]
+heatmap_plots$plot[[5]]
+```
+
+
+### Ranking of models (Internal Testing set)
+
+```{r}
+ranking_test <- accuracy_tbl %>%
+  # change metric in this step
+  dplyr::arrange(smape) %>% 
+  dplyr::mutate(rank = 1:nrow(.)) %>%
+  dplyr::relocate(.model_id, .model_desc, rank) 
+
+ranking_test %>% select(.model_id, rank, .model_desc) %>% gt() %>% 
+  tab_header(title='Model ranking') %>% 
+  opt_align_table_header('left')
+```
+
+### Forecast (Internal Testing set)
+
+#### No recursivo (incorrecto)
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test),
+                       new_data = data_test,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=T,
+                          .title = "Pronostico sobre los datos de test interno del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")
+```
+
+
+```{r}
+p3 <- calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test),
+                       new_data = data_test,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico sobre los datos de test interno del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p3
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_3.jpeg")
+ggsave(barplot_file, plot = p3, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+#### Recursivo (correcto)
+
+```{r}
+modeltime_forecast_recursive <- function(object, new_data = NULL, h = NULL, actual_data = NULL, 
+                                         conf_interval = 0.95, conf_by_id = FALSE, conf_method = "conformal_default", 
+                                         max_lag = 1, keep_data = FALSE, arrange_index = FALSE, ...) {
+
+  if (is.null(new_data) && is.null(h)) {
+    if (all(c(".type", ".calibration_data") %in% names(object))) {
+      message("Using '.calibration_data' to forecast recursively.")
+    } else if (!is.null(actual_data)) {
+      message("Using 'actual_data' to forecast recursively. This may not be deseable for sequence models such as ARIMA.")
+    } else {
+      rlang::abort("Forecast requires either: \n - 'new_data' \n - 'h'")
+    }
+  }
+
+  # Crear el tibble con los valores actuales (actual_data)
+  actual_results <- actual_data %>%
+    dplyr::mutate(
+      .model_id = NA_integer_,
+      .model_desc = "ACTUAL",
+      .key = "actual",
+      .value = value,
+      .conf_lo = NA_real_,
+      .conf_hi = NA_real_,
+      .index = date
+    )
+  
+  # Recorrer cada modelo para hacer predicciones recursivas
+  recursive_predictions <- object %>% 
+    dplyr::mutate(.recursive_forecasts = purrr::map2(.model, .model_id, function(model, model_id) {
+      group_data <- new_data
+      n_rows <- nrow(group_data)
+      group_preds <- numeric(n_rows)
+      conf_lo <- numeric(n_rows)
+      conf_hi <- numeric(n_rows)
+
+      # Predicciones recursivas
+      for (h in 1:n_rows) {
+        # Usar el modelo correcto para predecir
+        current_pred <- predict(model, new_data = group_data[h, , drop = FALSE])
+        group_preds[h] <- current_pred$.pred
+
+        # Actualizar lags recursivamente
+        if (h < n_rows) {
+          group_data[h + 1, "value_lag1"] <- current_pred$.pred
+          for (lag in 2:max_lag) {
+            if (paste0("value_lag", lag) %in% colnames(group_data)) {
+              group_data[h + 1, paste0("value_lag", lag)] <- group_data[h, paste0("value_lag", lag - 1)]
+            }
+          }
+        }
+
+        # Calcular intervalos de confianza
+        if (conf_method == "conformal_default") {
+          sd_pred <- sd(group_preds, na.rm = TRUE)
+          conf_lo[h] <- group_preds[h] - qnorm(1 - (1 - conf_interval) / 2) * sd_pred
+          conf_hi[h] <- group_preds[h] + qnorm(1 - (1 - conf_interval) / 2) * sd_pred
+        } else {
+          conf_lo[h] <- NA
+          conf_hi[h] <- NA
+        }
+      }
+
+      # Crear tibble de predicciones
+      pred_tibble <- tibble::tibble(
+        .model_id = rep(model_id, n_rows),
+        .model_desc = rep(object$.model_desc[object$.model_id == model_id], n_rows),
+        .key = rep("prediction", n_rows),
+        .index = group_data$date,
+        .value = group_preds,
+        .conf_lo = conf_lo,
+        .conf_hi = conf_hi,
+        date = group_data$date,
+        value = group_preds
+      )
+
+      # Agregar los lags
+      for (lag in 1:max_lag) {
+        if (paste0("value_lag", lag) %in% colnames(group_data)) {
+          pred_tibble[[paste0("value_lag", lag)]] <- group_data[[paste0("value_lag", lag)]]
+        } else {
+          pred_tibble[[paste0("value_lag", lag)]] <- NA
+        }
+      }
+
+      return(pred_tibble)
+    }))
+
+  # Unir los resultados de predicción
+  prediction_results <- dplyr::bind_rows(recursive_predictions$.recursive_forecasts)
+
+  # Unir los valores actuales con las predicciones
+  final_results <- dplyr::bind_rows(actual_results, prediction_results)
+
+  # Ordenar las columnas como especificaste
+  ordered_results <- final_results %>%
+    dplyr::relocate(c(.model_id, .model_desc, .key, .index,
+                        .value, .conf_lo, .conf_hi), .before = 1)
+
+  return(ordered_results)
+}
+```
+
+```{r}
+test_internal_forecast_recursive <- calibration_tbl %>%
+    modeltime_forecast_recursive(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test),
+                       new_data = data_test,
+                       keep_data = TRUE,
+                       max_lag = 52)
+
+p4 <- test_internal_forecast_recursive %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico sobre los datos de test interno del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p4
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_4.jpeg")
+ggsave(barplot_file, plot = p4, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+### Refit models
+
+```{r}
+models_refit_tbl <- calibration_tbl %>% 
+    modeltime_refit(
+        data = bind_rows(data_train,
+                         data_test),
+        control = control_refit(
+            allow_par = TRUE,
+            cores = ncores-1,
+            verbose = TRUE
+        )
+    )
+models_refit_tbl
+```
+
+### Calibration (External Testing set)
+
+```{r}
+calibration_tbl <- models_refit_tbl %>%
+    modeltime_calibrate(new_data = data_new)
+calibration_tbl
+```
+
+### Accuracy (External Testing set)
+
+```{r}
+# Realizar predicciones en data_test
+best_models <- best_models %>%
+  mutate(predictions = map(fit, ~ predict(.x, new_data = data_new)))
+
+# Unir las predicciones con data_test
+best_models <- best_models %>%
+  mutate(results = map(predictions,
+                       ~ bind_cols(data_new, .)))
+
+# Ver los resultados
+best_models %>%
+  select(wflow_id, results) %>%
+  unnest(results)
+```
+
+```{r}
+# Definir una función para calcular las métricas
+calculate_metrics <- function(data) {
+  metrics <- multi_met
+  
+  # Calcular las métricas
+  results <- metrics(data, truth = value, estimate = .pred)
+  
+  return(results)
+}
+
+# Evaluar el desempeño de los modelos en `data_test`
+best_models <- best_models %>%
+  mutate(performance = map(results, calculate_metrics))
+
+# Ver el desempeño
+performance_test <- best_models %>%
+  select(wflow_id, performance) %>%
+  unnest(performance) %>%
+  pivot_longer(cols = -c(.metric,
+                         .estimator,
+                         wflow_id),
+               names_to = "model", values_to = "value")
+```
+
+```{r}
+# ---- ACCURACY ----
+
+accuracy_tbl <- calibration_tbl %>%
+    modeltime_accuracy(metric_set = multi_met) %>% 
+  separate(.model_desc, c('recipe', 'model'), sep='_M_', remove=FALSE)
+accuracy_tbl %>% 
+  gt() %>% 
+  tab_header(title='Models sets evaluation') %>% 
+  tab_footnote(
+    footnote = "Only possible combinations of models with recipes are shown.",
+    locations = cells_column_labels(
+      columns = c(.model_id))
+  )
+```
+
+```{r}
+calibration_tbl %>%
+    modeltime_accuracy(metric_set = multi_met) %>% 
+  separate(.model_desc, c('recipe', 'model'),
+           sep='_M_',
+           remove=FALSE) %>%
+    table_modeltime_accuracy(
+        .interactive = TRUE
+    )
+```
+
+### Metrics headmap (External Testing set)
+
+```{r}
+# Asumimos que accuracy_tbl es el dataframe que contiene los datos
+
+heatmap_metrics <- accuracy_tbl %>%
+  pivot_longer(cols = c(smape, rmse, rsq, rsq_trad, mape, mae, mpe, ccc),
+               names_to = "metric") %>%
+  group_by(metric) %>%
+  summarise(plot_data = list(cur_data_all()))
+
+# Ahora creamos los gráficos fuera de summarise
+heatmap_plots <- heatmap_metrics %>%
+  mutate(
+    plot = map2(metric, plot_data, ~{
+      ggplot(.y, aes(x = recipe, y = model, fill = value)) +
+        geom_tile() +
+        scale_fill_gradient(low = "#ece2f0", high = "#02818a") +
+        labs(title = .x,
+             fill = .x) +
+        theme_minimal()
+    })
+  )
+
+# Para ver un gráfico en particular, puedes usar
+heatmap_plots$plot[[1]]
+heatmap_plots$plot[[5]]
+```
+
+### Ranking of models (External Testing set)
+
+```{r}
+ranking_test <- accuracy_tbl %>%
+  # change metric in this step
+  dplyr::arrange(smape) %>% 
+  dplyr::mutate(rank = 1:nrow(.)) %>%
+  dplyr::relocate(.model_id, .model_desc, rank) 
+
+ranking_test %>% select(.model_id, rank, .model_desc) %>% gt() %>% 
+  tab_header(title='Model ranking') %>% 
+  opt_align_table_header('left')
+```
+
+### Forecast (External Testing set)
+
+#### No recursivo (incorrecto)
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = data_new,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=T,
+                          .title = "Pronostico sobre los datos de test externo del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")
+```
+
+
+```{r}
+p5 <- calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = data_new,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico sobre los datos de test externo del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p5
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_5.jpeg")
+ggsave(barplot_file, plot = p5, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+```{r}
+data_extended_bake <- bake(prep(recipe_xgboost), new_data = future_data)
+data_bake <- bake(prep(recipe_xgboost), new_data = data)
+```
+
+```{r}
+fit_xgboost <- best_models$fit[[3]] %>%
+  extract_spec_parsnip() %>%
+  fit(value ~ .,
+      data = data_bake) #data_bake
+```
+
+```{r}
+predict_xgboost <- predict(object = fit_xgboost,
+        new_data = data_extended_bake %>%
+          filter(is.na(value)) %>%
+          bind_cols(data_extended %>%
+                      filter(is.na(value)) %>%
+                      select(date))) %>%
+  bind_cols(data_extended %>%
+              filter(is.na(value)) %>%
+              select(date))
+```
+#### Recursivo (correcto)
+
+```{r}
+recursive_predictions <- function(model, data_pred, data_rec, max_lag) {
+  group_data <- data_pred
+  group_preds <- numeric(nrow(group_data))
+  
+  for (h in 1:nrow(group_data)) {
+    current_pred <- model %>%
+      predict(new_data = bake(prep(data_rec), new_data = group_data[h, , drop = FALSE]))
+    
+    group_preds[h] <- current_pred$.pred
+    
+    if (h < nrow(group_data)) {
+      # Actualizamos solo value_lag1 y desplazamos los demás lags
+      group_data[h + 1, "value_lag1"] <- current_pred$.pred
+      for (lag in 2:max_lag) {
+        group_data[h + 1, paste0("value_lag", lag)] <- group_data[h, paste0("value_lag", lag - 1)]
+      }
+    }
+  }
+  
+  # Agregar las predicciones de value a group_data
+  group_data$value <- group_preds
+  return(group_data)
+}
+```
+
+
+```{r}
+predict_xgboost <- recursive_predictions(model = fit_xgboost,
+                                         data_pred = future_data,
+                                         data_rec = recipe_xgboost,
+                                         max_lag = 52)
+```
+
+```{r}
+ggplot(predict_xgboost,
+       aes(x = date, y = value)) +
+  geom_line(aes(colour = "predict"))
+```
+
+```{r}
+test_external_forecast_recursive <- calibration_tbl %>%
+    modeltime_forecast_recursive(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = data_new,
+                       keep_data = TRUE,
+                       max_lag = 52)
+
+p6 <- test_external_forecast_recursive %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico sobre los datos de test externo del precio de lechuga americana x kg en mercado",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p6
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_6.jpeg")
+ggsave(barplot_file, plot = p6, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+### Final Refit
+
+```{r}
+models_refit_tbl <- calibration_tbl %>% 
+    modeltime_refit(
+        data = bind_rows(data_train,
+                         data_test,
+                         data_new),
+        control = control_refit(
+            allow_par = TRUE,
+            cores = ncores-1,
+            verbose = TRUE
+        )
+    )
+models_refit_tbl
+```
+
+### Calibration (before the forecast)
+
+```{r}
+calibration_tbl <- models_refit_tbl %>%
+    modeltime_calibrate(new_data = data_new)
+calibration_tbl
+```
+
+### Final Forecast
+
+#### Pronóstico no recursivo (incorrecto)
+
+```{r}
+calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = future_data,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=T,
+                          .title = "Pronostico del precio de lechuga americana x kg en mercado para las siguientes 52 semanas",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")
+```
+
+
+```{r}
+p7 <- calibration_tbl %>%
+    modeltime_forecast(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = future_data,
+                       keep_data = TRUE) %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico del precio de lechuga americana x kg en mercado para las siguientes 52 semanas",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p7
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_7.jpeg")
+ggsave(barplot_file, plot = p7, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+#### Pronóstico recursivo (correcto)
+
+```{r}
+final_forecast_recursive <- calibration_tbl %>%
+    modeltime_forecast_recursive(#h = "8 weeks",
+                       actual_data = bind_rows(
+                         data_train,
+                         data_test,
+                         data_new),
+                       new_data = future_data,
+                       keep_data = TRUE,
+                       max_lag = 52)
+
+p8 <- final_forecast_recursive %>%
+    plot_modeltime_forecast(
+      .legend_max_width = 25, # For mobile screens
+      .interactive=F,
+                          .title = "Pronostico del precio de lechuga americana x kg en mercado para las siguientes 52 semanas",
+                          .y_lab = "S/.",
+                          .x_lab = "Fecha")  +
+  theme_classic() +
+  theme(legend.direction = 'vertical',
+        legend.position = 'bottom')
+p8
+```
+
+```{r}
+barplot_file <- paste0("img/barplot_8.jpeg")
+ggsave(barplot_file, plot = p8, 
+       width = 120,  # Ancho en mm
+       height = 90,  # Altura en mm
+       units = "mm",
+       dpi = 100,
+       scale = 3)
+```
+
+
+```{r}
+pron_2024 <- final_forecast_recursive %>% 
+  mutate(Año = as.numeric(format(.index, format = "%Y"))) %>%
+  filter(Año %in% 2024)
+
+pron_2025 <- final_forecast_recursive %>% 
+  mutate(Año = as.numeric(format(.index, format = "%Y"))) %>%
+  filter(Año %in% 2025)
+
+data_2024 <- data %>% 
+  mutate(Año = as.numeric(format(date, format = "%Y"))) %>%
+  filter(Año %in% 2024)
+
+mean(data_2024$value)
+
+```
+
+```{r}
+pron_2024 %>%
+  ungroup() %>%
+  group_by(.model_id, .model_desc) %>%
+  summarise(mean = mean(.value))
+
+```
+
+```{r}
+pron_2025 %>%
+  ungroup() %>%
+  group_by(.model_id, .model_desc) %>%
+  summarise(mean = mean(.value))
+```
+
+### Save results
+
+```{r}
+save.image(file = "summary.RData")
+```
